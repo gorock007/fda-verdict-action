@@ -22632,6 +22632,9 @@ function containerArgs(input2) {
   }
   const { limits } = input2;
   const online = input2.network !== "none";
+  if (online && (!input2.resolvConf?.startsWith("/") || /[,"\r\n]/.test(input2.resolvConf))) {
+    throw new VerdictError("setup needs a safe absolute resolver file path");
+  }
   return [
     "create",
     `--name=${input2.name}`,
@@ -22656,6 +22659,12 @@ function containerArgs(input2) {
     `--shm-size=${limits.shmSize}`,
     `--tmpfs=/tmp:rw,exec,nosuid,nodev,mode=1777,size=${limits.tmpSize}`,
     `--mount=type=bind,source=${input2.hostDir},target=${CONTAINER_WORKDIR2}`,
+    // --dns only sets Docker's upstreams on a user-defined bridge: it still
+    // writes 127.0.0.11, which runsc's isolated netstack cannot reach. Mount
+    // public resolvers directly; their packets still cross our host firewall.
+    ...online ? [
+      `--mount=type=bind,source=${input2.resolvConf},target=/etc/resolv.conf,readonly`
+    ] : [],
     `--workdir=${CONTAINER_WORKDIR2}`,
     // Nothing is inherited: only public test-only values.
     "--env=CI=1",
@@ -22775,6 +22784,7 @@ async function runStep(ctx, network, argv) {
       workspaceId: ctx.id,
       owner: ctx.owner,
       hostDir: ctx.workspace,
+      resolvConf: ctx.resolvConf,
       user: ctx.user,
       runtime: ctx.runtime,
       limits: ctx.limits,
@@ -22912,6 +22922,15 @@ async function execute(options) {
     if ((await changedPaths(pristine, workspace)).length > 0) {
       throw new VerdictError("the workspace copy differs from the export");
     }
+    const resolvConf = plan.setup.length > 0 ? join3(root, "resolv.conf") : void 0;
+    if (resolvConf) {
+      await writeFile3(
+        resolvConf,
+        VERDICT_SETUP_DNS.map((ip) => `nameserver ${ip}
+`).join(""),
+        { flag: "wx", mode: 292 }
+      );
+    }
     runtime = await detectRuntime(run, docker, options.runtime);
     const started = Date.now();
     const ctx = {
@@ -22924,6 +22943,7 @@ async function execute(options) {
       runtime,
       limits,
       workspace,
+      resolvConf,
       deadline: started + plan.limits.total_seconds * 1e3,
       commandMs: plan.limits.command_seconds * 1e3,
       baselineFree: await freeBytes(workspace),

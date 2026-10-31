@@ -350,6 +350,8 @@ export interface ContainerArgsInput {
   workspaceId: string;
   owner: string;
   hostDir: string;
+  /** Supervisor-owned resolver file, outside the workspace; required for setup. */
+  resolvConf?: string;
   user: string;
   runtime: VerdictRuntime;
   limits: ExecutionLimits;
@@ -371,6 +373,12 @@ export function containerArgs(input: ContainerArgsInput): string[] {
   }
   const { limits } = input;
   const online = input.network !== "none";
+  if (
+    online &&
+    (!input.resolvConf?.startsWith("/") || /[,"\r\n]/.test(input.resolvConf))
+  ) {
+    throw new VerdictError("setup needs a safe absolute resolver file path");
+  }
   return [
     "create",
     `--name=${input.name}`,
@@ -397,6 +405,14 @@ export function containerArgs(input: ContainerArgsInput): string[] {
     `--shm-size=${limits.shmSize}`,
     `--tmpfs=/tmp:rw,exec,nosuid,nodev,mode=1777,size=${limits.tmpSize}`,
     `--mount=type=bind,source=${input.hostDir},target=${CONTAINER_WORKDIR}`,
+    // --dns only sets Docker's upstreams on a user-defined bridge: it still
+    // writes 127.0.0.11, which runsc's isolated netstack cannot reach. Mount
+    // public resolvers directly; their packets still cross our host firewall.
+    ...(online
+      ? [
+          `--mount=type=bind,source=${input.resolvConf},target=/etc/resolv.conf,readonly`,
+        ]
+      : []),
     `--workdir=${CONTAINER_WORKDIR}`,
     // Nothing is inherited: only public test-only values.
     "--env=CI=1",
@@ -591,6 +607,7 @@ interface StepContext {
   runtime: VerdictRuntime;
   limits: ExecutionLimits;
   workspace: string;
+  resolvConf?: string;
   deadline: number;
   commandMs: number;
   baselineFree: number;
@@ -640,6 +657,7 @@ async function runStep(
       workspaceId: ctx.id,
       owner: ctx.owner,
       hostDir: ctx.workspace,
+      resolvConf: ctx.resolvConf,
       user: ctx.user,
       runtime: ctx.runtime,
       limits: ctx.limits,
@@ -807,6 +825,17 @@ export async function execute(options: ExecuteOptions): Promise<ExecuteResult> {
     if ((await changedPaths(pristine, workspace)).length > 0) {
       throw new VerdictError("the workspace copy differs from the export");
     }
+    // Customer code can write the workspace, but never this sibling file.
+    // It contains no host resolver/search domains and is removed with root.
+    const resolvConf =
+      plan.setup.length > 0 ? join(root, "resolv.conf") : undefined;
+    if (resolvConf) {
+      await writeFile(
+        resolvConf,
+        VERDICT_SETUP_DNS.map((ip) => `nameserver ${ip}\n`).join(""),
+        { flag: "wx", mode: 0o444 },
+      );
+    }
     runtime = await detectRuntime(run, docker, options.runtime);
     const started = Date.now();
     const ctx: StepContext = {
@@ -819,6 +848,7 @@ export async function execute(options: ExecuteOptions): Promise<ExecuteResult> {
       runtime,
       limits,
       workspace,
+      resolvConf,
       deadline: started + plan.limits.total_seconds * 1_000,
       commandMs: plan.limits.command_seconds * 1_000,
       baselineFree: await freeBytes(workspace),
