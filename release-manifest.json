@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "repository": "gorock007/fda-verdict-action",
+  "monorepo_commit": "c9d3232c20d43e8cd6f12a38a7bdeaac30b1bc80",
+  "source_clean": true,
+  "protocol_version": 1,
+  "gate_revision": "g1+hb-2",
+  "runner_version": 1,
+  "lock_sha256": "c7f380d2aeceebc98c0f6b8f135d461240c1c8c32f7cb80a11132f236dbe0735",
+  "action": {
+    "commit": "5a1dbdab6aa92eec23a9672e2b2de2b85988577d",
+    "bundle": "dist/index.mjs",
+    "bundle_sha256": "985c04fed47ce3e3481ca23a28f9aa4561976d8f5c230a3d8ac54ee41263b792",
+    "tree_sha256": "3cfcc6809be1ead2d3826c2e2ed31572975198e6db2176838aea0a7d59d3e84b"
+  },
+  "image": {
+    "ref": "ghcr.io/gorock007/fda-verdict-runner@sha256:7213a57f2b3af2d3b245bbd160de012dc6d06d4dff133c0f81bbd479959a6194",
+    "digest": "sha256:7213a57f2b3af2d3b245bbd160de012dc6d06d4dff133c0f81bbd479959a6194"
+  },
+  "gvisor": {
+    "url": "https://storage.googleapis.com/gvisor/releases/release/20261026/x86_64/gvisor.tar.bz2",
+    "digest": "sha256:096589d2d6078ba4caa26aa0200932f571aa5da9d08a5156b98ab1d93fa54468"
+  },
+  "app_slug": "fda-agents",
+  "report": {
+    "url": "https://app.namlo.si/api/v1/verdict/reports",
+    "audience": "fda-verdict-report"
+  },
+  "third_party": [
+    {
+      "name": "zod",
+      "version": "4.6.7",
+      "license": "MIT"
+    }
+  ],
+  "placeholder_pins": [],
+  "release_row": {
+    "action_sha": "5a1dbdab6aa92eec23a9672e2b2de2b85988577d",
+    "bundle_sha256": "985c04fed47ce3e3481ca23a28f9aa4561976d8f5c230a3d8ac54ee41263b792",
+    "image_digest": "sha256:7213a57f2b3af2d3b245bbd160de012dc6d06d4dff133c0f81bbd479959a6194",
+    "runtime_digest": "sha256:096589d2d6078ba4caa26aa0200932f571aa5da9d08a5156b98ab1d93fa54468",
+    "gate_revision": "g1+hb-2"
+  }
+}
