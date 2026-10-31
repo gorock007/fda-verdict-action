@@ -1,0 +1,60 @@
+# The bundled Namlo verdict Action (decision 0027). Internal to this
+# release's reusable workflow, which pins it by commit SHA (`A`); the
+# workflow supplies every input, never the caller.
+name: Namlo verdict (internal)
+description: Prepare, execute and report steps of the Namlo verdict reusable workflow. Not for direct use.
+author: Namlo
+inputs:
+  mode:
+    description: prepare, execute or report
+    required: true
+  token:
+    description: "prepare only: the job's read-only GITHUB_TOKEN"
+    required: false
+    default: ""
+  app-slug:
+    description: "prepare only: the FDA GitHub App's slug, from the release"
+    required: false
+    default: ""
+  prepare-digest:
+    description: "execute, report: the prepare job's record digest"
+    required: false
+    default: ""
+  source-digest:
+    description: "execute: the prepare job's source archive digest"
+    required: false
+    default: ""
+  image:
+    description: "execute: the execution image, pinned by digest in the release"
+    required: false
+    default: ""
+  gvisor-url:
+    description: "execute: the gVisor release tarball the release pins"
+    required: false
+    default: ""
+  gvisor-sha256:
+    description: "execute: SHA-256 of that tarball"
+    required: false
+    default: ""
+  result-digest:
+    description: "report: SHA-256 of the result artifact's ZIP, from the execute job"
+    required: false
+    default: ""
+  execute-result:
+    description: "report: the execute job's result, for the log"
+    required: false
+    default: ""
+outputs:
+  outcome:
+    description: The prepare or execute outcome
+  digest:
+    description: "prepare: SHA-256 of the preparation record"
+  source-digest:
+    description: "prepare: SHA-256 of the source archive, empty unless prepare passed"
+  runtime:
+    description: "execute: runsc or runc"
+  result-written:
+    description: "execute: true once result.json is written"
+runs:
+  using: node24
+  main: dist/index.mjs
