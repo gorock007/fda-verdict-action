@@ -31,7 +31,7 @@ import {
  * the verdict gate's own rules change; the hard-block version follows
  * `@fda/contracts`. A verifier accepts only its own revision.
  */
-export const VERDICT_GATE_REVISION = `g1+hb-${HARD_BLOCKS_VERSION}`;
+export const VERDICT_GATE_REVISION = `g2+hb-${HARD_BLOCKS_VERSION}`;
 
 /**
  * Paths a verdict-bearing code PR may never change, even when the org allows

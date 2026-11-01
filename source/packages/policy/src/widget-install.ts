@@ -1,5 +1,8 @@
 import {
   allowedSensitiveAreas,
+  identityRouteFor,
+  isWidgetInstallDir,
+  isWidgetInstallFilePath,
   type FdaInitiative,
   type HardBlock,
   type Intent,
@@ -57,6 +60,103 @@ export function isInitiativeFile(
   return path === initiative.identity_route || path === initiative.layout_file;
 }
 
+const APP_LAYOUTS = ["app/layout", "src/app/layout"].flatMap((base) =>
+  ["tsx", "ts", "jsx", "js"].map((extension) => `${base}.${extension}`),
+);
+const PAGES_LAYOUTS = ["pages/_app", "src/pages/_app"].flatMap((base) =>
+  ["tsx", "ts", "jsx", "js"].map((extension) => `${base}.${extension}`),
+);
+
+function underWidgetInstallDir(directory: string, path: string): string {
+  return directory === "." ? path : `${directory}/${path}`;
+}
+
+/** Whether a canonical file path is in a canonical directory, on a segment boundary. */
+function isInsideWidgetInstallDir(path: string, directory: string): boolean {
+  return directory === "." || path.startsWith(`${directory}/`);
+}
+
+/**
+ * Why a widget install's code-owned carrier metadata is inconsistent.
+ *
+ * Stored carriers from before app discovery have neither field and retain
+ * decision 0026's exact behavior. New carriers are checked independently by
+ * both intent and patch gates, so callers cannot bypass this by skipping the
+ * intent gate.
+ */
+export function widgetInstallCarrierIssues(
+  initiative: FdaInitiative,
+): string[] {
+  const { app_root: appRoot, npm_install: npmInstall } = initiative;
+  if (appRoot === undefined && npmInstall === undefined) return [];
+  if (appRoot === undefined || npmInstall === undefined) {
+    return [
+      "widget install: app_root and npm_install must be present together",
+    ];
+  }
+
+  const issues: string[] = [];
+  if (!isWidgetInstallDir(appRoot)) {
+    issues.push(
+      `widget install: app_root ${appRoot} must be a canonical repository directory`,
+    );
+  }
+  if (!isWidgetInstallDir(npmInstall.root)) {
+    issues.push(
+      `widget install: npm_install.root ${npmInstall.root} must be a canonical repository directory`,
+    );
+  }
+  if (!isWidgetInstallFilePath(initiative.layout_file)) {
+    issues.push(
+      `widget install: layout_file ${initiative.layout_file} must be a canonical repository file`,
+    );
+  }
+  if (!isWidgetInstallFilePath(initiative.identity_route)) {
+    issues.push(
+      `widget install: identity_route ${initiative.identity_route} must be a canonical repository file`,
+    );
+  }
+
+  const appLayout = APP_LAYOUTS.find(
+    (layout) =>
+      underWidgetInstallDir(appRoot, layout) === initiative.layout_file,
+  );
+  const pagesLayout = PAGES_LAYOUTS.find(
+    (layout) =>
+      underWidgetInstallDir(appRoot, layout) === initiative.layout_file,
+  );
+  const framework = appLayout
+    ? ("next-app" as const)
+    : pagesLayout
+      ? ("next-pages" as const)
+      : null;
+  if (!framework) {
+    issues.push(
+      `${initiative.layout_file}: widget install layout must be a recognized root layout under app_root ${appRoot}`,
+    );
+  } else {
+    const expectedRoute = identityRouteFor(framework, initiative.layout_file);
+    if (initiative.identity_route !== expectedRoute) {
+      issues.push(
+        `${initiative.identity_route}: widget install identity route must be ${expectedRoute} for ${initiative.layout_file}`,
+      );
+    }
+  }
+
+  if (npmInstall.mode === "standalone") {
+    if (npmInstall.root !== appRoot) {
+      issues.push(
+        `widget install: standalone npm_install.root must equal app_root ${appRoot}`,
+      );
+    }
+  } else if (!isInsideWidgetInstallDir(appRoot, npmInstall.root)) {
+    issues.push(
+      `widget install: workspace npm_install.root ${npmInstall.root} must be app_root ${appRoot} or its ancestor`,
+    );
+  }
+  return issues;
+}
+
 /**
  * Why `path` can't be one of a widget install's acceptance specs. The
  * carrier's allowed areas include `impact_auth` and the patch gate lets the
@@ -64,8 +164,24 @@ export function isInitiativeFile(
  * pattern and sit on no hard-block or auth-named path: otherwise it would
  * land as app code with the auth block lifted.
  */
-export function widgetInstallSpecPathIssues(path: string): string[] {
+export function widgetInstallSpecPathIssues(
+  path: string,
+  initiative?: FdaInitiative,
+): string[] {
   const issues: string[] = [];
+  if (!isWidgetInstallFilePath(path)) {
+    issues.push(
+      `${path}: a widget install's acceptance spec must be a canonical repository file`,
+    );
+  }
+  if (
+    initiative?.app_root !== undefined &&
+    !isInsideWidgetInstallDir(path, initiative.app_root)
+  ) {
+    issues.push(
+      `${path}: a new-format widget install's acceptance spec must be inside app_root ${initiative.app_root}`,
+    );
+  }
   if (!matchesAny(path, TEST_FILE_GLOBS)) {
     issues.push(
       `${path}: a widget install's acceptance spec must be a test file (decision 0026)`,
@@ -112,7 +228,7 @@ export function widgetInstallIntentIssues(
 ): string[] {
   const initiative = intent.fda_initiative;
   if (!initiative) return [];
-  const issues: string[] = [];
+  const issues: string[] = widgetInstallCarrierIssues(initiative);
   const want = [initiative.identity_route, initiative.layout_file];
   const have = [...new Set(intent.affected_files)];
   if (
@@ -145,7 +261,7 @@ export function widgetInstallIntentIssues(
         `${spec.path}: an acceptance spec may not be one of the install's two files`,
       );
     }
-    issues.push(...widgetInstallSpecPathIssues(spec.path));
+    issues.push(...widgetInstallSpecPathIssues(spec.path, initiative));
   }
   const missing = SPEC_MARKERS.filter(
     ({ pattern }) =>
@@ -172,8 +288,9 @@ export function widgetInstallPatchIssues(
   initiative: FdaInitiative,
   specPaths: ReadonlySet<string>,
 ): string[] {
-  const issues: string[] = [];
+  const issues: string[] = widgetInstallCarrierIssues(initiative);
   const only = `a widget install may only add ${initiative.identity_route}, modify ${initiative.layout_file} and add its acceptance specs (decision 0026)`;
+  const manifestPaths = new Set(manifest.files.map((file) => file.path));
   for (const file of manifest.files) {
     if (file.from !== undefined || file.status === "renamed") {
       issues.push(`${file.path}: renames are not part of a widget install`);
@@ -197,13 +314,20 @@ export function widgetInstallPatchIssues(
           `${file.path}: an acceptance spec may only be added (was ${file.status})`,
         );
       }
-      issues.push(...widgetInstallSpecPathIssues(file.path));
+      issues.push(...widgetInstallSpecPathIssues(file.path, initiative));
     } else {
       issues.push(`${file.path}: ${only}`);
     }
   }
   if (manifest.dependency_changes.length > 0) {
     issues.push("a widget install adds no dependencies");
+  }
+  if (initiative.app_root !== undefined) {
+    for (const path of specPaths) {
+      if (!manifestPaths.has(path)) {
+        issues.push(...widgetInstallSpecPathIssues(path, initiative));
+      }
+    }
   }
   return issues;
 }

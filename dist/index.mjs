@@ -20506,6 +20506,33 @@ var widgetInstallContextSchema = external_exports.strictObject({
 var WIDGET_INSTALL_FRAMEWORKS = ["next-app", "next-pages"];
 var widgetInstallFrameworkSchema = external_exports.enum(WIDGET_INSTALL_FRAMEWORKS);
 var WIDGET_JWT_LIBRARIES = ["jose", "node:crypto"];
+var CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+function isWidgetInstallFilePath(path) {
+  return path.length > 0 && path.length <= 500 && !CONTROL_CHARS.test(path) && !path.includes("\\") && path.split("/").every(
+    (segment) => segment !== "" && segment !== "." && segment !== ".." && !segment.startsWith("-")
+  );
+}
+function isWidgetInstallDir(path) {
+  return path === "." || isWidgetInstallFilePath(path);
+}
+function compareWidgetInstallPaths(a, b) {
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const x = a.codePointAt(i);
+    const y = b.codePointAt(j);
+    if (x !== y) return x < y ? -1 : 1;
+    i += x > 65535 ? 2 : 1;
+    j += y > 65535 ? 2 : 1;
+  }
+  return a.length - i === b.length - j ? 0 : a.length - i < b.length - j ? -1 : 1;
+}
+var widgetInstallDirSchema = external_exports.string().min(1).max(500).refine(isWidgetInstallDir, "expected a canonical repository directory");
+var scriptNameSchema = external_exports.string().min(1).max(200).refine((name) => !CONTROL_CHARS.test(name), "expected a script name");
+var widgetInstallNpmInstallSchema = external_exports.strictObject({
+  root: widgetInstallDirSchema,
+  mode: external_exports.enum(["standalone", "workspace"])
+});
 var evidenceSchema = external_exports.strictObject({
   path: repoPathSchema,
   line: external_exports.int().min(1),
@@ -20534,9 +20561,14 @@ var widgetInstallPlanSchema = external_exports.strictObject({
      */
     matched_customer_external_ids: external_exports.array(external_exports.string().min(1).max(200)).max(50)
   }),
-  /** The field on the session value that is the signed-in user's id. */
+  /**
+   * The field on the session value that is the signed-in user's id. When
+   * the app's auth library declares it (`library`), the evidence is the
+   * repository line that imports that library, not a declaration.
+   */
   user_id_field: evidenceSchema.extend({
-    expression: external_exports.string().min(1).max(200)
+    expression: external_exports.string().min(1).max(200),
+    library: external_exports.string().min(1).max(200).optional()
   }),
   /** The app's own way to sign in under test; null means a unit test of the token function instead. */
   test_login: evidenceSchema.extend({
@@ -20548,8 +20580,24 @@ var widgetInstallPlanSchema = external_exports.strictObject({
   jwt_library: external_exports.enum(WIDGET_JWT_LIBRARIES),
   /** The runner the e2e specs use, from the repository's scripts and config. */
   e2e_runner: external_exports.enum(["playwright"]).nullable(),
-  unit_runner: external_exports.enum(["vitest", "jest", "node:test"]).nullable()
-});
+  unit_runner: external_exports.enum(["vitest", "jest", "node:test"]).nullable(),
+  /**
+   * The application directory FDA selected (`.` for the repository root).
+   * This and the next two fields come together on every new plan and are
+   * all absent on plans stored before them, which run at the root as before.
+   */
+  app_root: widgetInstallDirSchema.optional(),
+  /** Where `npm ci` runs for this app. */
+  npm_install: widgetInstallNpmInstallSchema.optional(),
+  /** The app's own package.json scripts the specs run with. */
+  test_scripts: external_exports.strictObject({
+    unit: scriptNameSchema.nullable(),
+    e2e: scriptNameSchema.nullable()
+  }).optional()
+}).refine(
+  (plan) => allOrNone([plan.app_root, plan.npm_install, plan.test_scripts]),
+  "app_root, npm_install and test_scripts come together or not at all"
+);
 var WIDGET_INSTALL_STOP_REASONS = [
   "no_customers",
   "not_node_typescript",
@@ -20557,8 +20605,13 @@ var WIDGET_INSTALL_STOP_REASONS = [
   "no_layout",
   "no_session_helper",
   "no_customer_field",
+  "no_user_id_field",
   "already_installed",
-  "investigation_failed"
+  "investigation_failed",
+  "incomplete_repo_map",
+  "ambiguous_app_root",
+  "unsupported_install_layout",
+  "unsupported_test_setup"
 ];
 var widgetInstallStopReasonSchema = external_exports.enum(
   WIDGET_INSTALL_STOP_REASONS
@@ -20566,7 +20619,17 @@ var widgetInstallStopReasonSchema = external_exports.enum(
 var widgetInstallStopSchema = external_exports.strictObject({
   outcome: external_exports.literal("stopped"),
   reason: widgetInstallStopReasonSchema,
-  detail: external_exports.string().min(1).max(2e3)
+  detail: external_exports.string().min(1).max(2e3),
+  /**
+   * Every application directory FDA found when it would not choose between
+   * them, sorted and unique; absent on other stops and on older rows.
+   */
+  candidate_roots: external_exports.array(widgetInstallDirSchema).max(2e3).refine(
+    (roots) => roots.every(
+      (root, i) => i === 0 || compareWidgetInstallPaths(roots[i - 1], root) < 0
+    ),
+    "expected sorted, unique directories"
+  ).optional()
 });
 var widgetInstallOutcomeSchema = external_exports.discriminatedUnion("outcome", [
   widgetInstallPlanSchema,
@@ -20575,8 +20638,23 @@ var widgetInstallOutcomeSchema = external_exports.discriminatedUnion("outcome", 
 var fdaInitiativeSchema = external_exports.strictObject({
   kind: external_exports.literal(WIDGET_INSTALL_CONTEXT_KIND),
   identity_route: repoPathSchema,
-  layout_file: repoPathSchema
-});
+  layout_file: repoPathSchema,
+  /** Code-owned execution metadata of new plans; absent on older carriers. */
+  app_root: widgetInstallDirSchema.optional(),
+  npm_install: widgetInstallNpmInstallSchema.optional()
+}).refine(
+  (initiative) => allOrNone([initiative.app_root, initiative.npm_install]),
+  "app_root and npm_install come together or not at all"
+);
+function allOrNone(fields) {
+  const present = fields.filter((field) => field !== void 0).length;
+  return present === 0 || present === fields.length;
+}
+function identityRouteFor(framework, layoutFile) {
+  const dir = layoutFile.includes("/") ? layoutFile.slice(0, layoutFile.lastIndexOf("/")) : "";
+  const under = (file2) => dir ? `${dir}/${file2}` : file2;
+  return framework === "next-app" ? under("api/fda/identity/route.ts") : under("api/fda/identity.ts");
+}
 
 // packages/contracts/src/intent.ts
 var ACCEPTANCE_SPEC_KINDS = ["unit", "e2e"];
@@ -23204,8 +23282,91 @@ function allowedAreasFor(policy, carrier) {
 function isInitiativeFile(initiative, path) {
   return path === initiative.identity_route || path === initiative.layout_file;
 }
-function widgetInstallSpecPathIssues(path) {
+var APP_LAYOUTS = ["app/layout", "src/app/layout"].flatMap(
+  (base) => ["tsx", "ts", "jsx", "js"].map((extension) => `${base}.${extension}`)
+);
+var PAGES_LAYOUTS = ["pages/_app", "src/pages/_app"].flatMap(
+  (base) => ["tsx", "ts", "jsx", "js"].map((extension) => `${base}.${extension}`)
+);
+function underWidgetInstallDir(directory, path) {
+  return directory === "." ? path : `${directory}/${path}`;
+}
+function isInsideWidgetInstallDir(path, directory) {
+  return directory === "." || path.startsWith(`${directory}/`);
+}
+function widgetInstallCarrierIssues(initiative) {
+  const { app_root: appRoot, npm_install: npmInstall } = initiative;
+  if (appRoot === void 0 && npmInstall === void 0) return [];
+  if (appRoot === void 0 || npmInstall === void 0) {
+    return [
+      "widget install: app_root and npm_install must be present together"
+    ];
+  }
   const issues = [];
+  if (!isWidgetInstallDir(appRoot)) {
+    issues.push(
+      `widget install: app_root ${appRoot} must be a canonical repository directory`
+    );
+  }
+  if (!isWidgetInstallDir(npmInstall.root)) {
+    issues.push(
+      `widget install: npm_install.root ${npmInstall.root} must be a canonical repository directory`
+    );
+  }
+  if (!isWidgetInstallFilePath(initiative.layout_file)) {
+    issues.push(
+      `widget install: layout_file ${initiative.layout_file} must be a canonical repository file`
+    );
+  }
+  if (!isWidgetInstallFilePath(initiative.identity_route)) {
+    issues.push(
+      `widget install: identity_route ${initiative.identity_route} must be a canonical repository file`
+    );
+  }
+  const appLayout = APP_LAYOUTS.find(
+    (layout) => underWidgetInstallDir(appRoot, layout) === initiative.layout_file
+  );
+  const pagesLayout = PAGES_LAYOUTS.find(
+    (layout) => underWidgetInstallDir(appRoot, layout) === initiative.layout_file
+  );
+  const framework = appLayout ? "next-app" : pagesLayout ? "next-pages" : null;
+  if (!framework) {
+    issues.push(
+      `${initiative.layout_file}: widget install layout must be a recognized root layout under app_root ${appRoot}`
+    );
+  } else {
+    const expectedRoute = identityRouteFor(framework, initiative.layout_file);
+    if (initiative.identity_route !== expectedRoute) {
+      issues.push(
+        `${initiative.identity_route}: widget install identity route must be ${expectedRoute} for ${initiative.layout_file}`
+      );
+    }
+  }
+  if (npmInstall.mode === "standalone") {
+    if (npmInstall.root !== appRoot) {
+      issues.push(
+        `widget install: standalone npm_install.root must equal app_root ${appRoot}`
+      );
+    }
+  } else if (!isInsideWidgetInstallDir(appRoot, npmInstall.root)) {
+    issues.push(
+      `widget install: workspace npm_install.root ${npmInstall.root} must be app_root ${appRoot} or its ancestor`
+    );
+  }
+  return issues;
+}
+function widgetInstallSpecPathIssues(path, initiative) {
+  const issues = [];
+  if (!isWidgetInstallFilePath(path)) {
+    issues.push(
+      `${path}: a widget install's acceptance spec must be a canonical repository file`
+    );
+  }
+  if (initiative?.app_root !== void 0 && !isInsideWidgetInstallDir(path, initiative.app_root)) {
+    issues.push(
+      `${path}: a new-format widget install's acceptance spec must be inside app_root ${initiative.app_root}`
+    );
+  }
   if (!matchesAny(path, TEST_FILE_GLOBS)) {
     issues.push(
       `${path}: a widget install's acceptance spec must be a test file (decision 0026)`
@@ -23220,8 +23381,9 @@ function widgetInstallSpecPathIssues(path) {
   return issues;
 }
 function widgetInstallPatchIssues(manifest, initiative, specPaths) {
-  const issues = [];
+  const issues = widgetInstallCarrierIssues(initiative);
   const only = `a widget install may only add ${initiative.identity_route}, modify ${initiative.layout_file} and add its acceptance specs (decision 0026)`;
+  const manifestPaths = new Set(manifest.files.map((file2) => file2.path));
   for (const file2 of manifest.files) {
     if (file2.from !== void 0 || file2.status === "renamed") {
       issues.push(`${file2.path}: renames are not part of a widget install`);
@@ -23245,13 +23407,20 @@ function widgetInstallPatchIssues(manifest, initiative, specPaths) {
           `${file2.path}: an acceptance spec may only be added (was ${file2.status})`
         );
       }
-      issues.push(...widgetInstallSpecPathIssues(file2.path));
+      issues.push(...widgetInstallSpecPathIssues(file2.path, initiative));
     } else {
       issues.push(`${file2.path}: ${only}`);
     }
   }
   if (manifest.dependency_changes.length > 0) {
     issues.push("a widget install adds no dependencies");
+  }
+  if (initiative.app_root !== void 0) {
+    for (const path of specPaths) {
+      if (!manifestPaths.has(path)) {
+        issues.push(...widgetInstallSpecPathIssues(path, initiative));
+      }
+    }
   }
   return issues;
 }
@@ -23576,7 +23745,7 @@ function specIntegrityIssues(specs, observed, manifest) {
 }
 
 // packages/verdict/src/gate.ts
-var VERDICT_GATE_REVISION = `g1+hb-${HARD_BLOCKS_VERSION}`;
+var VERDICT_GATE_REVISION = `g2+hb-${HARD_BLOCKS_VERSION}`;
 var VERDICT_RESERVED_GLOBS = [
   ".github/**",
   VERDICT_CONFIG_PATH,
