@@ -1,0 +1,21 @@
+# Namlo verification (decision 0027), installed by Namlo's setup PR at
+# .github/workflows/fda-verdict.yml. It runs from the default branch
+# (pull_request_target), so a PR cannot change or disable it, and it calls
+# Namlo's reviewed release at a full commit SHA. Nothing here checks out or
+# runs code from the PR; the release's execution job does that in an
+# isolated container with no token. Change it only through a Namlo setup PR.
+name: Namlo verdict
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+concurrency:
+  group: fda-verdict-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  verdict:
+    name: Namlo verdict
+    uses: gorock007/fda-verdict-action/.github/workflows/verdict.yml@@@FDA_RELEASE_SHA@@
